@@ -1,10 +1,13 @@
 use anyhow::anyhow;
+use axum::headers::HeaderMapExt;
 use axum::{
     extract::MatchedPath,
     http::{Request, Response},
     routing::get,
     Extension, Router,
 };
+use collab::api::billing::sync_llm_usage_with_stripe_periodically;
+use collab::api::CloudflareIpCountryHeader;
 use collab::llm::{db::LlmDatabase, log_usage_periodically};
 use collab::migrations::run_database_migrations;
 use collab::user_backfiller::spawn_user_backfiller;
@@ -27,7 +30,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{
     filter::EnvFilter, fmt::format::JsonFields, util::SubscriberInitExt, Layer,
 };
-use util::ResultExt as _;
+use util::{maybe, ResultExt as _};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REVISION: Option<&'static str> = option_env!("GITHUB_SHA");
@@ -86,7 +89,7 @@ async fn main() -> Result<()> {
                 .route("/healthz", get(handle_liveness_probe))
                 .layer(Extension(mode));
 
-            let listener = TcpListener::bind(&format!("0.0.0.0:{}", config.http_port))
+            let listener = TcpListener::bind(format!("0.0.0.0:{}", config.http_port))
                 .expect("failed to bind TCP listener");
 
             let mut on_shutdown = None;
@@ -134,6 +137,29 @@ async fn main() -> Result<()> {
                     fetch_extensions_from_blob_store_periodically(state.clone());
                     spawn_user_backfiller(state.clone());
 
+                    let llm_db = maybe!(async {
+                        let database_url = state
+                            .config
+                            .llm_database_url
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("missing LLM_DATABASE_URL"))?;
+                        let max_connections = state
+                            .config
+                            .llm_database_max_connections
+                            .ok_or_else(|| anyhow!("missing LLM_DATABASE_MAX_CONNECTIONS"))?;
+
+                        let mut db_options = db::ConnectOptions::new(database_url);
+                        db_options.max_connections(max_connections);
+                        LlmDatabase::new(db_options, state.executor.clone()).await
+                    })
+                    .await
+                    .trace_err();
+
+                    if let Some(mut llm_db) = llm_db {
+                        llm_db.initialize().await?;
+                        sync_llm_usage_with_stripe_periodically(state.clone(), llm_db);
+                    }
+
                     app = app
                         .merge(collab::api::events::router())
                         .merge(collab::api::extensions::router())
@@ -150,10 +176,16 @@ async fn main() -> Result<()> {
                             .get::<MatchedPath>()
                             .map(MatchedPath::as_str);
 
+                        let geoip_country_code = request
+                            .headers()
+                            .typed_get::<CloudflareIpCountryHeader>()
+                            .map(|header| header.to_string());
+
                         tracing::info_span!(
                             "http_request",
                             method = ?request.method(),
                             matched_path,
+                            geoip_country_code,
                             user_id = tracing::field::Empty,
                             login = tracing::field::Empty,
                             authn.jti = tracing::field::Empty,
@@ -249,7 +281,7 @@ async fn setup_app_database(config: &Config) -> Result<()> {
     db.initialize_notification_kinds().await?;
 
     if config.seed_path.is_some() {
-        collab::seed::seed(&config, &db, false).await?;
+        collab::seed::seed(config, &db, false).await?;
     }
 
     Ok(())

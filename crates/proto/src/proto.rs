@@ -7,9 +7,7 @@ mod typed_envelope;
 pub use error::*;
 pub use typed_envelope::*;
 
-use anyhow::anyhow;
 use collections::HashMap;
-use futures::{future::BoxFuture, Future};
 pub use prost::{DecodeError, Message};
 use serde::Serialize;
 use std::{
@@ -17,11 +15,13 @@ use std::{
     cmp,
     fmt::{self, Debug},
     iter, mem,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 include!(concat!(env!("OUT_DIR"), "/zed.messages.rs"));
+
+pub const SSH_PEER_ID: PeerId = PeerId { owner_id: 0, id: 0 };
+pub const SSH_PROJECT_ID: u64 = 0;
 
 pub trait EnvelopedMessage: Clone + Debug + Serialize + Sized + Send + Sync + 'static {
     const NAME: &'static str;
@@ -58,55 +58,6 @@ pub trait AnyTypedEnvelope: 'static + Send + Sync {
 pub enum MessagePriority {
     Foreground,
     Background,
-}
-
-pub trait ProtoClient: Send + Sync {
-    fn request(
-        &self,
-        envelope: Envelope,
-        request_type: &'static str,
-    ) -> BoxFuture<'static, anyhow::Result<Envelope>>;
-
-    fn send(&self, envelope: Envelope) -> anyhow::Result<()>;
-}
-
-#[derive(Clone)]
-pub struct AnyProtoClient(Arc<dyn ProtoClient>);
-
-impl<T> From<Arc<T>> for AnyProtoClient
-where
-    T: ProtoClient + 'static,
-{
-    fn from(client: Arc<T>) -> Self {
-        Self(client)
-    }
-}
-
-impl AnyProtoClient {
-    pub fn new<T: ProtoClient + 'static>(client: Arc<T>) -> Self {
-        Self(client)
-    }
-
-    pub fn request<T: RequestMessage>(
-        &self,
-        request: T,
-    ) -> impl Future<Output = anyhow::Result<T::Response>> {
-        let envelope = request.into_envelope(0, None, None);
-        let response = self.0.request(envelope, T::NAME);
-        async move {
-            T::Response::from_envelope(response.await?)
-                .ok_or_else(|| anyhow!("received response of the wrong type"))
-        }
-    }
-
-    pub fn send<T: EnvelopedMessage>(&self, request: T) -> anyhow::Result<()> {
-        let envelope = request.into_envelope(0, None, None);
-        self.0.send(envelope)
-    }
-
-    pub fn send_dynamic(&self, message: Envelope) -> anyhow::Result<()> {
-        self.0.send(message)
-    }
 }
 
 impl<T: EnvelopedMessage> AnyTypedEnvelope for TypedEnvelope<T> {
@@ -328,8 +279,6 @@ messages!(
     (SaveBuffer, Foreground),
     (SetChannelMemberRole, Foreground),
     (SetChannelVisibility, Foreground),
-    (SearchProject, Background),
-    (SearchProjectResponse, Background),
     (SendChannelMessage, Background),
     (SendChannelMessageResponse, Background),
     (ShareProject, Foreground),
@@ -341,8 +290,6 @@ messages!(
     (SynchronizeBuffersResponse, Foreground),
     (TaskContextForLocation, Background),
     (TaskContext, Background),
-    (TaskTemplates, Background),
-    (TaskTemplatesResponse, Background),
     (Test, Foreground),
     (Unfollow, Foreground),
     (UnshareProject, Foreground),
@@ -412,7 +359,11 @@ messages!(
     (AddWorktreeResponse, Foreground),
     (FindSearchCandidates, Background),
     (FindSearchCandidatesResponse, Background),
-    (CloseBuffer, Foreground)
+    (CloseBuffer, Foreground),
+    (UpdateUserSettings, Foreground),
+    (CheckFileExists, Background),
+    (CheckFileExistsResponse, Background),
+    (ShutdownRemoteServer, Foreground),
 );
 
 request_messages!(
@@ -500,7 +451,6 @@ request_messages!(
     (RespondToChannelInvite, Ack),
     (RespondToContactRequest, Ack),
     (SaveBuffer, BufferSaved),
-    (SearchProject, SearchProjectResponse),
     (FindSearchCandidates, FindSearchCandidatesResponse),
     (SendChannelMessage, SendChannelMessageResponse),
     (SetChannelMemberRole, Ack),
@@ -508,7 +458,6 @@ request_messages!(
     (ShareProject, ShareProjectResponse),
     (SynchronizeBuffers, SynchronizeBuffersResponse),
     (TaskContextForLocation, TaskContext),
-    (TaskTemplates, TaskTemplatesResponse),
     (Test, Test),
     (UpdateBuffer, Ack),
     (UpdateParticipantLocation, Ack),
@@ -536,16 +485,20 @@ request_messages!(
     (SynchronizeContexts, SynchronizeContextsResponse),
     (LspExtSwitchSourceHeader, LspExtSwitchSourceHeaderResponse),
     (AddWorktree, AddWorktreeResponse),
+    (CheckFileExists, CheckFileExistsResponse),
+    (ShutdownRemoteServer, Ack)
 );
 
 entity_messages!(
     {project_id, ShareProject},
     AddProjectCollaborator,
+    AddWorktree,
     ApplyCodeAction,
     ApplyCompletionAdditionalEdits,
     BlameBuffer,
     BufferReloaded,
     BufferSaved,
+    CloseBuffer,
     CopyProjectEntry,
     CreateBufferForPeer,
     CreateProjectEntry,
@@ -584,11 +537,9 @@ entity_messages!(
     ResolveCompletionDocumentation,
     ResolveInlayHint,
     SaveBuffer,
-    SearchProject,
     StartLanguageServer,
     SynchronizeBuffers,
     TaskContextForLocation,
-    TaskTemplates,
     UnshareProject,
     UpdateBuffer,
     UpdateBufferFile,
@@ -605,7 +556,9 @@ entity_messages!(
     CreateContext,
     UpdateContext,
     SynchronizeContexts,
-    LspExtSwitchSourceHeader
+    LspExtSwitchSourceHeader,
+    UpdateUserSettings,
+    CheckFileExists,
 );
 
 entity_messages!(
