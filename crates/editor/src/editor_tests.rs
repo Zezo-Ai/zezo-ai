@@ -6357,12 +6357,29 @@ async fn test_autoclose_and_auto_surround_pairs(cx: &mut TestAppContext) {
     cx.update_editor(|editor, window, cx| editor.handle_input("{", window, cx));
     cx.assert_editor_state("{«aˇ»} b");
 
-    // Autclose pair where the start and end characters are the same
+    // Autoclose when not immediately after a word character
+    cx.set_state("a ˇ");
+    cx.update_editor(|editor, window, cx| editor.handle_input("\"", window, cx));
+    cx.assert_editor_state("a \"ˇ\"");
+
+    // Autoclose pair where the start and end characters are the same
+    cx.update_editor(|editor, window, cx| editor.handle_input("\"", window, cx));
+    cx.assert_editor_state("a \"\"ˇ");
+
+    // Don't autoclose when immediately after a word character
     cx.set_state("aˇ");
     cx.update_editor(|editor, window, cx| editor.handle_input("\"", window, cx));
-    cx.assert_editor_state("a\"ˇ\"");
+    cx.assert_editor_state("a\"ˇ");
+
+    // Do autoclose when after a non-word character
+    cx.set_state("{ˇ");
     cx.update_editor(|editor, window, cx| editor.handle_input("\"", window, cx));
-    cx.assert_editor_state("a\"\"ˇ");
+    cx.assert_editor_state("{\"ˇ\"");
+
+    // Non identical pairs autoclose regardless of preceding character
+    cx.set_state("aˇ");
+    cx.update_editor(|editor, window, cx| editor.handle_input("{", window, cx));
+    cx.assert_editor_state("a{ˇ}");
 
     // Don't autoclose pair if autoclose is disabled
     cx.set_state("ˇ");
@@ -9349,6 +9366,67 @@ async fn test_word_completions_do_not_duplicate_lsp_ones(cx: &mut TestAppContext
             panic!("expected completion menu to be open");
         }
         editor.cancel(&Cancel, window, cx);
+    });
+}
+
+#[gpui::test]
+async fn test_word_completions_usually_skip_digits(cx: &mut TestAppContext) {
+    init_test(cx, |language_settings| {
+        language_settings.defaults.completions = Some(CompletionSettings {
+            words: WordsCompletionMode::Fallback,
+            lsp: false,
+            lsp_fetch_timeout_ms: 0,
+        });
+    });
+
+    let mut cx = EditorLspTestContext::new_rust(lsp::ServerCapabilities::default(), cx).await;
+
+    cx.set_state(indoc! {"ˇ
+        0_usize
+        let
+        33
+        4.5f32
+    "});
+    cx.update_editor(|editor, window, cx| {
+        editor.show_completions(&ShowCompletions::default(), window, cx);
+    });
+    cx.executor().run_until_parked();
+    cx.condition(|editor, _| editor.context_menu_visible())
+        .await;
+    cx.update_editor(|editor, window, cx| {
+        if let Some(CodeContextMenu::Completions(menu)) = editor.context_menu.borrow_mut().as_ref()
+        {
+            assert_eq!(
+                completion_menu_entries(&menu),
+                &["let"],
+                "With no digits in the completion query, no digits should be in the word completions"
+            );
+        } else {
+            panic!("expected completion menu to be open");
+        }
+        editor.cancel(&Cancel, window, cx);
+    });
+
+    cx.set_state(indoc! {"3ˇ
+        0_usize
+        let
+        3
+        33.35f32
+    "});
+    cx.update_editor(|editor, window, cx| {
+        editor.show_completions(&ShowCompletions::default(), window, cx);
+    });
+    cx.executor().run_until_parked();
+    cx.condition(|editor, _| editor.context_menu_visible())
+        .await;
+    cx.update_editor(|editor, _, _| {
+        if let Some(CodeContextMenu::Completions(menu)) = editor.context_menu.borrow_mut().as_ref()
+        {
+            assert_eq!(completion_menu_entries(&menu), &["33", "35f32"], "The digit is in the completion query, \
+                return matching words with digits (`33`, `35f32`) but exclude query duplicates (`3`)");
+        } else {
+            panic!("expected completion menu to be open");
+        }
     });
 }
 
