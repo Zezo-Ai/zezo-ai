@@ -1,5 +1,5 @@
 use futures::channel::oneshot;
-use futures::{select_biased, FutureExt};
+use futures::{FutureExt, select_biased};
 use gpui::{App, Context, Global, Subscription, Task, Window};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -93,6 +93,15 @@ impl FeatureFlag for NotebookFeatureFlag {
 pub struct Debugger {}
 impl FeatureFlag for Debugger {
     const NAME: &'static str = "debugger";
+}
+
+pub struct ThreadAutoCapture {}
+impl FeatureFlag for ThreadAutoCapture {
+    const NAME: &'static str = "thread-auto-capture";
+
+    fn enabled_for_staff() -> bool {
+        false
+    }
 }
 
 pub trait FeatureFlagViewExt<V: 'static> {

@@ -1,11 +1,12 @@
 use crate::{
+    DevicePixels, ForegroundExecutor, Size,
     platform::{ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream},
-    px, size, Pixels, Size,
+    size,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use block::ConcreteBlock;
 use cocoa::{
-    base::{id, nil, YES},
+    base::{YES, id, nil},
     foundation::NSArray,
 };
 use core_foundation::base::TCFType;
@@ -36,9 +37,6 @@ pub struct MacScreenCaptureStream {
     sc_stream_output: id,
 }
 
-#[link(name = "ScreenCaptureKit", kind = "framework")]
-extern "C" {}
-
 static mut DELEGATE_CLASS: *const Class = ptr::null();
 static mut OUTPUT_CLASS: *const Class = ptr::null();
 const FRAME_CALLBACK_IVAR: &str = "frame_callback";
@@ -47,7 +45,7 @@ const FRAME_CALLBACK_IVAR: &str = "frame_callback";
 const SCStreamOutputTypeScreen: NSInteger = 0;
 
 impl ScreenCaptureSource for MacScreenCaptureSource {
-    fn resolution(&self) -> Result<Size<Pixels>> {
+    fn resolution(&self) -> Result<Size<DevicePixels>> {
         unsafe {
             let display_id: CGDirectDisplayID = msg_send![self.sc_display, displayID];
             let display_mode_ref = CGDisplayCopyDisplayMode(display_id);
@@ -55,13 +53,17 @@ impl ScreenCaptureSource for MacScreenCaptureSource {
             let height = CGDisplayModeGetPixelHeight(display_mode_ref);
             CGDisplayModeRelease(display_mode_ref);
 
-            Ok(size(px(width as f32), px(height as f32)))
+            Ok(size(
+                DevicePixels(width as i32),
+                DevicePixels(height as i32),
+            ))
         }
     }
 
     fn stream(
         &self,
-        frame_callback: Box<dyn Fn(ScreenCaptureFrame)>,
+        _foreground_executor: &ForegroundExecutor,
+        frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
     ) -> oneshot::Receiver<Result<Box<dyn ScreenCaptureStream>>> {
         unsafe {
             let stream: id = msg_send![class!(SCStream), alloc];
@@ -200,28 +202,31 @@ pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Box<dyn ScreenCaptur
 #[ctor]
 unsafe fn build_classes() {
     let mut decl = ClassDecl::new("GPUIStreamDelegate", class!(NSObject)).unwrap();
-    decl.add_method(
-        sel!(outputVideoEffectDidStartForStream:),
-        output_video_effect_did_start_for_stream as extern "C" fn(&Object, Sel, id),
-    );
-    decl.add_method(
-        sel!(outputVideoEffectDidStopForStream:),
-        output_video_effect_did_stop_for_stream as extern "C" fn(&Object, Sel, id),
-    );
-    decl.add_method(
-        sel!(stream:didStopWithError:),
-        stream_did_stop_with_error as extern "C" fn(&Object, Sel, id, id),
-    );
-    DELEGATE_CLASS = decl.register();
+    unsafe {
+        decl.add_method(
+            sel!(outputVideoEffectDidStartForStream:),
+            output_video_effect_did_start_for_stream as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(outputVideoEffectDidStopForStream:),
+            output_video_effect_did_stop_for_stream as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(stream:didStopWithError:),
+            stream_did_stop_with_error as extern "C" fn(&Object, Sel, id, id),
+        );
+        DELEGATE_CLASS = decl.register();
 
-    let mut decl = ClassDecl::new("GPUIStreamOutput", class!(NSObject)).unwrap();
-    decl.add_method(
-        sel!(stream:didOutputSampleBuffer:ofType:),
-        stream_did_output_sample_buffer_of_type as extern "C" fn(&Object, Sel, id, id, NSInteger),
-    );
-    decl.add_ivar::<*mut c_void>(FRAME_CALLBACK_IVAR);
+        let mut decl = ClassDecl::new("GPUIStreamOutput", class!(NSObject)).unwrap();
+        decl.add_method(
+            sel!(stream:didOutputSampleBuffer:ofType:),
+            stream_did_output_sample_buffer_of_type
+                as extern "C" fn(&Object, Sel, id, id, NSInteger),
+        );
+        decl.add_ivar::<*mut c_void>(FRAME_CALLBACK_IVAR);
 
-    OUTPUT_CLASS = decl.register();
+        OUTPUT_CLASS = decl.register();
+    }
 }
 
 extern "C" fn output_video_effect_did_start_for_stream(_this: &Object, _: Sel, _stream: id) {}

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use crate::schema::json_schema_for;
+use anyhow::{Result, anyhow};
 use assistant_tool::{ActionLog, Tool};
 use chrono::{Local, Utc};
 use gpui::{App, Entity, Task};
-use language_model::LanguageModelRequestMessage;
+use language_model::{LanguageModelRequestMessage, LanguageModelToolSchemaFormat};
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ impl Tool for NowTool {
         "now".into()
     }
 
-    fn needs_confirmation(&self) -> bool {
+    fn needs_confirmation(&self, _: &serde_json::Value, _: &App) -> bool {
         false
     }
 
@@ -44,9 +45,8 @@ impl Tool for NowTool {
         IconName::Info
     }
 
-    fn input_schema(&self) -> serde_json::Value {
-        let schema = schemars::schema_for!(NowToolInput);
-        serde_json::to_value(&schema).unwrap()
+    fn input_schema(&self, format: LanguageModelToolSchemaFormat) -> serde_json::Value {
+        json_schema_for::<NowToolInput>(format)
     }
 
     fn ui_text(&self, _input: &serde_json::Value) -> String {

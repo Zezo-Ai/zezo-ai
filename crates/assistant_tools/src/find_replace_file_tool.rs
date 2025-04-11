@@ -1,7 +1,8 @@
-use anyhow::{anyhow, Context as _, Result};
+use crate::{replace::replace_with_flexible_indent, schema::json_schema_for};
+use anyhow::{Context as _, Result, anyhow};
 use assistant_tool::{ActionLog, Tool};
-use gpui::{App, AppContext, Entity, Task};
-use language_model::LanguageModelRequestMessage;
+use gpui::{App, AppContext, AsyncApp, Entity, Task};
+use language_model::{LanguageModelRequestMessage, LanguageModelToolSchemaFormat};
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -62,10 +63,20 @@ pub struct FindReplaceFileToolInput {
     /// even one character in this string is different in any way from how it appears
     /// in the file, then the tool call will fail.
     ///
+    /// If you get an error that the `find` string was not found, this means that either
+    /// you made a mistake, or that the file has changed since you last looked at it.
+    /// Either way, when this happens, you should retry doing this tool call until it
+    /// succeeds, up to 3 times. Each time you retry, you should take another look at
+    /// the exact text of the file in question, to make sure that you are searching for
+    /// exactly the right string. Regardless of whether it was because you made a mistake
+    /// or because the file changed since you last looked at it, you should be extra
+    /// careful when retrying in this way. It's a bad experience for the user if
+    /// this `find` string isn't found, so be super careful to get it exactly right!
+    ///
     /// <example>
     /// If a file contains this code:
     ///
-    /// ```rust
+    /// ```ignore
     /// fn check_user_permissions(user_id: &str) -> Result<bool> {
     ///     // Check if user exists first
     ///     let user = database.find_user(user_id)?;
@@ -83,7 +94,7 @@ pub struct FindReplaceFileToolInput {
     /// Your find string should include at least 3 lines of context before and after the part
     /// you want to change:
     ///
-    /// ```
+    /// ```ignore
     /// fn check_user_permissions(user_id: &str) -> Result<bool> {
     ///     // Check if user exists first
     ///     let user = database.find_user(user_id)?;
@@ -100,7 +111,7 @@ pub struct FindReplaceFileToolInput {
     ///
     /// And your replace string might look like:
     ///
-    /// ```
+    /// ```ignore
     /// fn check_user_permissions(user_id: &str) -> Result<bool> {
     ///     // Check if user exists first
     ///     let user = database.find_user(user_id)?;
@@ -125,11 +136,11 @@ pub struct FindReplaceFileTool;
 
 impl Tool for FindReplaceFileTool {
     fn name(&self) -> String {
-        "find-replace-file".into()
+        "find_replace_file".into()
     }
 
-    fn needs_confirmation(&self) -> bool {
-        true
+    fn needs_confirmation(&self, _: &serde_json::Value, _: &App) -> bool {
+        false
     }
 
     fn description(&self) -> String {
@@ -140,9 +151,8 @@ impl Tool for FindReplaceFileTool {
         IconName::Pencil
     }
 
-    fn input_schema(&self) -> serde_json::Value {
-        let schema = schemars::schema_for!(FindReplaceFileToolInput);
-        serde_json::to_value(&schema).unwrap()
+    fn input_schema(&self, format: LanguageModelToolSchemaFormat) -> serde_json::Value {
+        json_schema_for::<FindReplaceFileToolInput>(format)
     }
 
     fn ui_text(&self, input: &serde_json::Value) -> String {
@@ -165,7 +175,7 @@ impl Tool for FindReplaceFileTool {
             Err(err) => return Task::ready(Err(anyhow!(err))),
         };
 
-        cx.spawn(async move |cx| {
+        cx.spawn(async move |cx: &mut AsyncApp| {
             let project_path = project.read_with(cx, |project, cx| {
                 project
                     .find_project_path(&input.path, cx)
@@ -182,30 +192,29 @@ impl Tool for FindReplaceFileTool {
                 return Err(anyhow!("`find` string cannot be empty. Use a different tool if you want to create a file."));
             }
 
+            if input.find == input.replace {
+                return Err(anyhow!("The `find` and `replace` strings are identical, so no changes would be made."));
+            }
+
             let result = cx
                 .background_spawn(async move {
-                    replace_exact(&input.find, &input.replace, &snapshot).await
+                    // Try to match exactly
+                    let diff = replace_exact(&input.find, &input.replace, &snapshot)
+                    .await
+                    // If that fails, try being flexible about indentation
+                    .or_else(|| replace_with_flexible_indent(&input.find, &input.replace, &snapshot))?;
+
+                    if diff.edits.is_empty() {
+                        return None;
+                    }
+
+                    let old_text = snapshot.text();
+
+                    Some((old_text, diff))
                 })
                 .await;
 
-            if let Some(diff) = result {
-                let edit_ids = buffer.update(cx, |buffer, cx| {
-                    buffer.finalize_last_transaction();
-                    buffer.apply_diff(diff, false, cx);
-                    let transaction = buffer.finalize_last_transaction();
-                    transaction.map_or(Vec::new(), |transaction| transaction.edit_ids.clone())
-                })?;
-
-                action_log.update(cx, |log, cx| {
-                    log.buffer_edited(buffer.clone(), edit_ids, cx)
-                })?;
-
-                project.update(cx, |project, cx| {
-                    project.save_buffer(buffer, cx)
-                })?.await?;
-
-                Ok(format!("Edited {}", input.path.display()))
-            } else {
+            let Some((old_text, diff)) = result else {
                 let err = buffer.read_with(cx, |buffer, _cx| {
                     let file_exists = buffer
                         .file()
@@ -223,8 +232,37 @@ impl Tool for FindReplaceFileTool {
                     }
                 })?;
 
-                Err(err)
-            }
+                return Err(err)
+            };
+
+            let snapshot = cx.update(|cx| {
+                action_log.update(cx, |log, cx| {
+                    log.buffer_read(buffer.clone(), cx)
+                });
+                let snapshot = buffer.update(cx, |buffer, cx| {
+                    buffer.finalize_last_transaction();
+                    buffer.apply_diff(diff, cx);
+                    buffer.finalize_last_transaction();
+                    buffer.snapshot()
+                });
+                action_log.update(cx, |log, cx| {
+                    log.buffer_edited(buffer.clone(), cx)
+                });
+                snapshot
+            })?;
+
+            project.update( cx, |project, cx| {
+                project.save_buffer(buffer, cx)
+            })?.await?;
+
+            let diff_str = cx.background_spawn(async move {
+                let new_text = snapshot.text();
+                language::unified_diff(&old_text, &new_text)
+            }).await;
+
+
+            Ok(format!("Edited {}:\n\n```diff\n{}\n```", input.path.display(), diff_str))
+
         })
     }
 }

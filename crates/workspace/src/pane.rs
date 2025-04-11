@@ -1,4 +1,7 @@
 use crate::{
+    CloseWindow, NewFile, NewTerminal, OpenInTerminal, OpenOptions, OpenTerminal, OpenVisible,
+    SplitDirection, ToggleFileFinder, ToggleProjectSymbols, ToggleZoom, Workspace,
+    WorkspaceItemBuilder,
     item::{
         ActivateOnClose, ClosePosition, Item, ItemHandle, ItemSettings, PreviewTabsSettings,
         ProjectItemKind, ShowCloseButton, ShowDiagnostics, TabContentParams, TabTooltipContent,
@@ -8,19 +11,16 @@ use crate::{
     notifications::NotifyResultExt,
     toolbar::Toolbar,
     workspace_settings::{AutosaveSetting, TabBarSettings, WorkspaceSettings},
-    CloseWindow, NewFile, NewTerminal, OpenInTerminal, OpenOptions, OpenTerminal, OpenVisible,
-    SplitDirection, ToggleFileFinder, ToggleProjectSymbols, ToggleZoom, Workspace,
-    WorkspaceItemBuilder,
 };
 use anyhow::Result;
 use collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{
-    actions, anchored, deferred, impl_actions, prelude::*, Action, AnyElement, App,
-    AsyncWindowContext, ClickEvent, ClipboardItem, Context, Corner, Div, DragMoveEvent, Entity,
-    EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent, Focusable, KeyContext,
-    MouseButton, MouseDownEvent, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, WeakEntity, WeakFocusHandle, Window,
+    Action, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Corner, Div,
+    DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
+    Focusable, KeyContext, MouseButton, MouseDownEvent, NavigationDirection, Pixels, Point,
+    PromptLevel, Render, ScrollHandle, Subscription, Task, WeakEntity, WeakFocusHandle, Window,
+    actions, anchored, deferred, impl_actions, prelude::*,
 };
 use itertools::Itertools;
 use language::DiagnosticSeverity;
@@ -36,18 +36,18 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use theme::ThemeSettings;
 use ui::{
-    prelude::*, right_click_menu, ButtonSize, Color, ContextMenu, ContextMenuEntry,
-    ContextMenuItem, DecoratedIcon, IconButton, IconButtonShape, IconDecoration,
-    IconDecorationKind, IconName, IconSize, Indicator, Label, PopoverMenu, PopoverMenuHandle, Tab,
-    TabBar, TabPosition, Tooltip,
+    ButtonSize, Color, ContextMenu, ContextMenuEntry, ContextMenuItem, DecoratedIcon, IconButton,
+    IconButtonShape, IconDecoration, IconDecorationKind, IconName, IconSize, Indicator, Label,
+    PopoverMenu, PopoverMenuHandle, Tab, TabBar, TabPosition, Tooltip, prelude::*,
+    right_click_menu,
 };
-use util::{debug_panic, maybe, truncate_and_remove_front, ResultExt};
+use util::{ResultExt, debug_panic, maybe, truncate_and_remove_front};
 
 /// A selected entry in e.g. project panel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -294,7 +294,7 @@ pub struct Pane {
     toolbar: Entity<Toolbar>,
     pub(crate) workspace: WeakEntity<Workspace>,
     project: WeakEntity<Project>,
-    drag_split_direction: Option<SplitDirection>,
+    pub drag_split_direction: Option<SplitDirection>,
     can_drop_predicate: Option<Arc<dyn Fn(&dyn Any, &mut Window, &mut App) -> bool>>,
     custom_drop_handle: Option<
         Arc<dyn Fn(&mut Pane, &dyn Any, &mut Window, &mut Context<Pane>) -> ControlFlow<(), ()>>,
@@ -309,6 +309,7 @@ pub struct Pane {
             &mut Context<Pane>,
         ) -> (Option<AnyElement>, Option<AnyElement>),
     >,
+    render_tab_bar: Rc<dyn Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> AnyElement>,
     show_tab_bar_buttons: bool,
     _subscriptions: Vec<Subscription>,
     tab_bar_scroll_handle: ScrollHandle,
@@ -435,88 +436,8 @@ impl Pane {
             custom_drop_handle: None,
             can_split_predicate: None,
             should_display_tab_bar: Rc::new(|_, cx| TabBarSettings::get_global(cx).show),
-            render_tab_bar_buttons: Rc::new(move |pane, window, cx| {
-                if !pane.has_focus(window, cx) && !pane.context_menu_focused(window, cx) {
-                    return (None, None);
-                }
-                // Ideally we would return a vec of elements here to pass directly to the [TabBar]'s
-                // `end_slot`, but due to needing a view here that isn't possible.
-                let right_children = h_flex()
-                    // Instead we need to replicate the spacing from the [TabBar]'s `end_slot` here.
-                    .gap(DynamicSpacing::Base04.rems(cx))
-                    .child(
-                        PopoverMenu::new("pane-tab-bar-popover-menu")
-                            .trigger_with_tooltip(
-                                IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-                                Tooltip::text("New..."),
-                            )
-                            .anchor(Corner::TopRight)
-                            .with_handle(pane.new_item_context_menu_handle.clone())
-                            .menu(move |window, cx| {
-                                Some(ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.action("New File", NewFile.boxed_clone())
-                                        .action(
-                                            "Open File",
-                                            ToggleFileFinder::default().boxed_clone(),
-                                        )
-                                        .separator()
-                                        .action(
-                                            "Search Project",
-                                            DeploySearch {
-                                                replace_enabled: false,
-                                            }
-                                            .boxed_clone(),
-                                        )
-                                        .action(
-                                            "Search Symbols",
-                                            ToggleProjectSymbols.boxed_clone(),
-                                        )
-                                        .separator()
-                                        .action("New Terminal", NewTerminal.boxed_clone())
-                                }))
-                            }),
-                    )
-                    .child(
-                        PopoverMenu::new("pane-tab-bar-split")
-                            .trigger_with_tooltip(
-                                IconButton::new("split", IconName::Split)
-                                    .icon_size(IconSize::Small),
-                                Tooltip::text("Split Pane"),
-                            )
-                            .anchor(Corner::TopRight)
-                            .with_handle(pane.split_item_context_menu_handle.clone())
-                            .menu(move |window, cx| {
-                                ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.action("Split Right", SplitRight.boxed_clone())
-                                        .action("Split Left", SplitLeft.boxed_clone())
-                                        .action("Split Up", SplitUp.boxed_clone())
-                                        .action("Split Down", SplitDown.boxed_clone())
-                                })
-                                .into()
-                            }),
-                    )
-                    .child({
-                        let zoomed = pane.is_zoomed();
-                        IconButton::new("toggle_zoom", IconName::Maximize)
-                            .icon_size(IconSize::Small)
-                            .toggle_state(zoomed)
-                            .selected_icon(IconName::Minimize)
-                            .on_click(cx.listener(|pane, _, window, cx| {
-                                pane.toggle_zoom(&crate::ToggleZoom, window, cx);
-                            }))
-                            .tooltip(move |window, cx| {
-                                Tooltip::for_action(
-                                    if zoomed { "Zoom Out" } else { "Zoom In" },
-                                    &ToggleZoom,
-                                    window,
-                                    cx,
-                                )
-                            })
-                    })
-                    .into_any_element()
-                    .into();
-                (None, right_children)
-            }),
+            render_tab_bar_buttons: Rc::new(default_render_tab_bar_buttons),
+            render_tab_bar: Rc::new(Self::render_tab_bar),
             show_tab_bar_buttons: TabBarSettings::get_global(cx).show_tab_bar_buttons,
             display_nav_history_buttons: Some(
                 TabBarSettings::get_global(cx).show_nav_history_buttons,
@@ -722,6 +643,14 @@ impl Pane {
         self.toolbar.update(cx, |toolbar, cx| {
             toolbar.set_can_navigate(can_navigate, cx);
         });
+        cx.notify();
+    }
+
+    pub fn set_render_tab_bar<F>(&mut self, cx: &mut Context<Self>, render: F)
+    where
+        F: 'static + Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> AnyElement,
+    {
+        self.render_tab_bar = Rc::new(render);
         cx.notify();
     }
 
@@ -1814,11 +1743,9 @@ impl Pane {
         save_intent: SaveIntent,
         cx: &mut AsyncWindowContext,
     ) -> Result<bool> {
-        const CONFLICT_MESSAGE: &str =
-                "This file has changed on disk since you started editing it. Do you want to overwrite it?";
+        const CONFLICT_MESSAGE: &str = "This file has changed on disk since you started editing it. Do you want to overwrite it?";
 
-        const DELETED_MESSAGE: &str =
-                        "This file has been deleted on disk since you started editing it. Do you want to recreate it?";
+        const DELETED_MESSAGE: &str = "This file has been deleted on disk since you started editing it. Do you want to recreate it?";
 
         if save_intent == SaveIntent::Skip {
             return Ok(true);
@@ -2208,7 +2135,7 @@ impl Pane {
         focus_handle: &FocusHandle,
         window: &mut Window,
         cx: &mut Context<Pane>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let is_active = ix == self.active_item_index;
         let is_preview = self
             .preview_item_id
@@ -2670,7 +2597,7 @@ impl Pane {
         })
     }
 
-    fn render_tab_bar(&mut self, window: &mut Window, cx: &mut Context<Pane>) -> impl IntoElement {
+    fn render_tab_bar(&mut self, window: &mut Window, cx: &mut Context<Pane>) -> AnyElement {
         let focus_handle = self.focus_handle.clone();
         let navigate_backward = IconButton::new("navigate_backward", IconName::ArrowLeft)
             .icon_size(IconSize::Small)
@@ -2793,6 +2720,7 @@ impl Pane {
                             })),
                     ),
             )
+            .into_any_element()
     }
 
     pub fn render_menu_overlay(menu: &Entity<ContextMenu>) -> Div {
@@ -2866,7 +2794,7 @@ impl Pane {
         }
     }
 
-    fn handle_tab_drop(
+    pub fn handle_tab_drop(
         &mut self,
         dragged_tab: &DraggedTab,
         ix: usize,
@@ -3139,6 +3067,86 @@ impl Pane {
     }
 }
 
+fn default_render_tab_bar_buttons(
+    pane: &mut Pane,
+    window: &mut Window,
+    cx: &mut Context<Pane>,
+) -> (Option<AnyElement>, Option<AnyElement>) {
+    if !pane.has_focus(window, cx) && !pane.context_menu_focused(window, cx) {
+        return (None, None);
+    }
+    // Ideally we would return a vec of elements here to pass directly to the [TabBar]'s
+    // `end_slot`, but due to needing a view here that isn't possible.
+    let right_children = h_flex()
+        // Instead we need to replicate the spacing from the [TabBar]'s `end_slot` here.
+        .gap(DynamicSpacing::Base04.rems(cx))
+        .child(
+            PopoverMenu::new("pane-tab-bar-popover-menu")
+                .trigger_with_tooltip(
+                    IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
+                    Tooltip::text("New..."),
+                )
+                .anchor(Corner::TopRight)
+                .with_handle(pane.new_item_context_menu_handle.clone())
+                .menu(move |window, cx| {
+                    Some(ContextMenu::build(window, cx, |menu, _, _| {
+                        menu.action("New File", NewFile.boxed_clone())
+                            .action("Open File", ToggleFileFinder::default().boxed_clone())
+                            .separator()
+                            .action(
+                                "Search Project",
+                                DeploySearch {
+                                    replace_enabled: false,
+                                }
+                                .boxed_clone(),
+                            )
+                            .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
+                            .separator()
+                            .action("New Terminal", NewTerminal.boxed_clone())
+                    }))
+                }),
+        )
+        .child(
+            PopoverMenu::new("pane-tab-bar-split")
+                .trigger_with_tooltip(
+                    IconButton::new("split", IconName::Split).icon_size(IconSize::Small),
+                    Tooltip::text("Split Pane"),
+                )
+                .anchor(Corner::TopRight)
+                .with_handle(pane.split_item_context_menu_handle.clone())
+                .menu(move |window, cx| {
+                    ContextMenu::build(window, cx, |menu, _, _| {
+                        menu.action("Split Right", SplitRight.boxed_clone())
+                            .action("Split Left", SplitLeft.boxed_clone())
+                            .action("Split Up", SplitUp.boxed_clone())
+                            .action("Split Down", SplitDown.boxed_clone())
+                    })
+                    .into()
+                }),
+        )
+        .child({
+            let zoomed = pane.is_zoomed();
+            IconButton::new("toggle_zoom", IconName::Maximize)
+                .icon_size(IconSize::Small)
+                .toggle_state(zoomed)
+                .selected_icon(IconName::Minimize)
+                .on_click(cx.listener(|pane, _, window, cx| {
+                    pane.toggle_zoom(&crate::ToggleZoom, window, cx);
+                }))
+                .tooltip(move |window, cx| {
+                    Tooltip::for_action(
+                        if zoomed { "Zoom Out" } else { "Zoom In" },
+                        &ToggleZoom,
+                        window,
+                        cx,
+                    )
+                })
+        })
+        .into_any_element()
+        .into();
+    (None, right_children)
+}
+
 impl Focusable for Pane {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -3303,7 +3311,7 @@ impl Render for Pane {
                 }),
             )
             .when(self.active_item().is_some() && display_tab_bar, |pane| {
-                pane.child(self.render_tab_bar(window, cx))
+                pane.child((self.render_tab_bar.clone())(self, window, cx))
             })
             .child({
                 let has_worktrees = project.read(cx).visible_worktrees(cx).next().is_some();
@@ -3499,7 +3507,7 @@ impl NavHistory {
         let mut state = self.0.lock();
         let entry = match mode {
             NavigationMode::Normal | NavigationMode::Disabled | NavigationMode::ClosingItem => {
-                return None
+                return None;
             }
             NavigationMode::GoingBack => &mut state.backward_stack,
             NavigationMode::GoingForward => &mut state.forward_stack,
@@ -3703,8 +3711,8 @@ mod tests {
         let pane = workspace.update(cx, |workspace, _| workspace.active_pane().clone());
 
         pane.update_in(cx, |pane, window, cx| {
-            assert!(pane
-                .close_active_item(
+            assert!(
+                pane.close_active_item(
                     &CloseActiveItem {
                         save_intent: None,
                         close_pinned: false
@@ -3712,7 +3720,8 @@ mod tests {
                     window,
                     cx
                 )
-                .is_none())
+                .is_none()
+            )
         });
     }
 
