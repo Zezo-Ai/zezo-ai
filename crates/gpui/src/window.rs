@@ -1,27 +1,27 @@
 use crate::{
-    point, prelude::*, px, size, transparent_black, Action, AnyDrag, AnyElement, AnyTooltip,
-    AnyView, App, AppContext, Arena, Asset, AsyncWindowContext, AvailableSpace, Background,
-    BorderStyle, Bounds, BoxShadow, Context, Corners, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
-    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Replay, ResizeEdge, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
+    Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Context,
+    Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId,
+    DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, FontId,
+    Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PolychromeSprite, PromptLevel, Quad, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
     SubscriberSet, Subscription, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
     TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS,
+    point, prelude::*, px, size, transparent_black,
 };
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
 use derive_more::{Deref, DerefMut};
-use futures::channel::oneshot;
 use futures::FutureExt;
+use futures::channel::oneshot;
 use parking_lot::RwLock;
 use raw_window_handle::{HandleError, HasWindowHandle};
 use refineable::Refineable;
@@ -39,13 +39,13 @@ use std::{
     ops::{DerefMut, Range},
     rc::Rc,
     sync::{
-        atomic::{AtomicUsize, Ordering::SeqCst},
         Arc, Weak,
+        atomic::{AtomicUsize, Ordering::SeqCst},
     },
     time::{Duration, Instant},
 };
 use util::post_inc;
-use util::{measure, ResultExt};
+use util::{ResultExt, measure};
 use uuid::Uuid;
 
 mod prompts;
@@ -646,6 +646,7 @@ pub struct Window {
     pending_modifier: ModifierState,
     pub(crate) pending_input_observers: SubscriberSet<(), AnyObserver>,
     prompt: Option<RenderablePromptHandle>,
+    pub(crate) client_inset: Option<Pixels>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -845,6 +846,7 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, cx| {
                         window.active.set(active);
+                        window.modifiers = window.platform_window.modifiers();
                         window
                             .activation_observers
                             .clone()
@@ -930,13 +932,14 @@ impl Window {
             pending_modifier: ModifierState::default(),
             pending_input_observers: SubscriberSet::new(),
             prompt: None,
+            client_inset: None,
         })
     }
 
     pub(crate) fn new_focus_listener(
         &self,
         value: AnyWindowFocusListener,
-    ) -> (Subscription, impl FnOnce()) {
+    ) -> (Subscription, impl FnOnce() + use<>) {
         self.focus_listeners.insert((), value)
     }
 }
@@ -1219,7 +1222,7 @@ impl Window {
         Evt: 'static,
     {
         let entity_id = entity.entity_id();
-        let entity = entity.downgrade();
+        let handle = entity.downgrade();
         let window_handle = self.handle;
         cx.new_subscription(
             entity_id,
@@ -1228,9 +1231,9 @@ impl Window {
                 Box::new(move |event, cx| {
                     window_handle
                         .update(cx, |_, window, cx| {
-                            if let Some(handle) = Entity::<Emitter>::upgrade_from(&entity) {
+                            if let Some(entity) = handle.upgrade() {
                                 let event = event.downcast_ref().expect("invalid event type");
-                                on_event(handle, event, window, cx);
+                                on_event(entity, event, window, cx);
                                 true
                             } else {
                                 false
@@ -1386,8 +1389,14 @@ impl Window {
     }
 
     /// When using client side decorations, set this to the width of the invisible decorations (Wayland and X11)
-    pub fn set_client_inset(&self, inset: Pixels) {
+    pub fn set_client_inset(&mut self, inset: Pixels) {
+        self.client_inset = Some(inset);
         self.platform_window.set_client_inset(inset);
+    }
+
+    /// Returns the client_inset value by [`Self::set_client_inset`].
+    pub fn client_inset(&self) -> Option<Pixels> {
+        self.client_inset
     }
 
     /// Returns whether the title bar window controls need to be rendered by the application (Wayland and X11)
@@ -3092,6 +3101,7 @@ impl Window {
                             value: Arc::new(paths.clone()),
                             view: cx.new(|_| paths).into(),
                             cursor_offset: position,
+                            cursor_style: None,
                         });
                     }
                     PlatformInput::MouseMove(MouseMoveEvent {
@@ -3719,11 +3729,11 @@ impl Window {
     }
 
     /// Returns a generic handler that invokes the given handler with the view and context associated with the given view handle.
-    pub fn handler_for<V: Render>(
+    pub fn handler_for<V: Render, Callback: Fn(&mut V, &mut Window, &mut Context<V>) + 'static>(
         &self,
         view: &Entity<V>,
-        f: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
-    ) -> impl Fn(&mut Window, &mut App) {
+        f: Callback,
+    ) -> impl Fn(&mut Window, &mut App) + use<V, Callback> {
         let view = view.downgrade();
         move |window: &mut Window, cx: &mut App| {
             view.update(cx, |view, cx| f(view, window, cx)).ok();

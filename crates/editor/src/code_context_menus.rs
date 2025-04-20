@@ -1,34 +1,36 @@
+use feature_flags::{Debugger, FeatureFlagAppExt as _};
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
-    div, px, uniform_list, AnyElement, BackgroundExecutor, Entity, Focusable, FontWeight,
-    ListSizingBehavior, ScrollStrategy, SharedString, Size, StrikethroughStyle, StyledText,
-    UniformListScrollHandle,
+    AnyElement, BackgroundExecutor, Entity, Focusable, FontWeight, ListSizingBehavior,
+    ScrollStrategy, SharedString, Size, StrikethroughStyle, StyledText, UniformListScrollHandle,
+    div, px, uniform_list,
 };
 use language::Buffer;
 use language::CodeLabel;
-use markdown::Markdown;
+use markdown::{Markdown, MarkdownElement};
 use multi_buffer::{Anchor, ExcerptId};
 use ordered_float::OrderedFloat;
-use project::lsp_store::CompletionDocumentation;
 use project::CompletionSource;
+use project::lsp_store::CompletionDocumentation;
 use project::{CodeAction, Completion, TaskSourceKind};
 
 use std::{
     cell::RefCell,
-    cmp::{min, Reverse},
+    cmp::{Reverse, min},
     iter,
     ops::Range,
     rc::Rc,
 };
 use task::ResolvedTask;
-use ui::{prelude::*, Color, IntoElement, ListItem, Pixels, Popover, Styled};
+use ui::{Color, IntoElement, ListItem, Pixels, Popover, Styled, prelude::*};
 use util::ResultExt;
 
 use crate::hover_popover::{hover_markdown_style, open_markdown_url};
 use crate::{
+    CodeActionProvider, CompletionId, CompletionProvider, DisplayRow, Editor, EditorStyle,
+    ResolvedTasks,
     actions::{ConfirmCodeAction, ConfirmCompletion},
-    split_words, styled_runs_for_code_label, CodeActionProvider, CompletionId, CompletionProvider,
-    DisplayRow, Editor, EditorStyle, ResolvedTasks,
+    split_words, styled_runs_for_code_label,
 };
 
 pub const MENU_GAP: Pixels = px(4.);
@@ -124,16 +126,15 @@ impl CodeContextMenu {
         &self,
         style: &EditorStyle,
         max_height_in_lines: u32,
-        y_flipped: bool,
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) -> AnyElement {
         match self {
             CodeContextMenu::Completions(menu) => {
-                menu.render(style, max_height_in_lines, y_flipped, window, cx)
+                menu.render(style, max_height_in_lines, window, cx)
             }
             CodeContextMenu::CodeActions(menu) => {
-                menu.render(style, max_height_in_lines, y_flipped, window, cx)
+                menu.render(style, max_height_in_lines, window, cx)
             }
         }
     }
@@ -229,7 +230,7 @@ impl CompletionsMenu {
         let completions = choices
             .iter()
             .map(|choice| Completion {
-                old_range: selection.start.text_anchor..selection.end.text_anchor,
+                replace_range: selection.start.text_anchor..selection.end.text_anchor,
                 new_text: choice.to_string(),
                 label: CodeLabel {
                     text: choice.to_string(),
@@ -239,6 +240,7 @@ impl CompletionsMenu {
                 icon_path: None,
                 documentation: None,
                 confirm: None,
+                insert_text_mode: None,
                 source: CompletionSource::Custom,
             })
             .collect();
@@ -437,7 +439,6 @@ impl CompletionsMenu {
         &self,
         style: &EditorStyle,
         max_height_in_lines: u32,
-        y_flipped: bool,
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) -> AnyElement {
@@ -587,7 +588,6 @@ impl CompletionsMenu {
         .occlude()
         .max_h(max_height_in_lines as f32 * window.line_height())
         .track_scroll(self.scroll_handle.clone())
-        .y_flipped(y_flipped)
         .with_width_from_item(widest_completion_ix)
         .with_sizing_behavior(ListSizingBehavior::Infer);
 
@@ -622,21 +622,20 @@ impl CompletionsMenu {
                         let language = editor
                             .language_at(self.initial_position, cx)
                             .map(|l| l.name().to_proto());
-                        Markdown::new(
-                            SharedString::default(),
-                            hover_markdown_style(window, cx),
-                            languages,
-                            language,
-                            cx,
-                        )
-                        .copy_code_block_buttons(false)
-                        .open_url(open_markdown_url)
+                        Markdown::new(SharedString::default(), languages, language, cx)
                     })
                 });
                 markdown.update(cx, |markdown, cx| {
                     markdown.reset(parsed.clone(), cx);
                 });
-                div().child(markdown.clone())
+                div().child(
+                    MarkdownElement::new(markdown.clone(), hover_markdown_style(window, cx))
+                        .code_block_renderer(markdown::CodeBlockRenderer::Default {
+                            copy_button: false,
+                            border: false,
+                        })
+                        .on_url_click(open_markdown_url),
+                )
             }
             CompletionDocumentation::MultiLineMarkdown(_) => return None,
             CompletionDocumentation::SingleLine(_) => return None,
@@ -778,11 +777,34 @@ pub struct AvailableCodeAction {
 
 #[derive(Clone)]
 pub struct CodeActionContents {
-    pub tasks: Option<Rc<ResolvedTasks>>,
-    pub actions: Option<Rc<[AvailableCodeAction]>>,
+    tasks: Option<Rc<ResolvedTasks>>,
+    actions: Option<Rc<[AvailableCodeAction]>>,
 }
 
 impl CodeActionContents {
+    pub fn new(
+        mut tasks: Option<ResolvedTasks>,
+        actions: Option<Rc<[AvailableCodeAction]>>,
+        cx: &App,
+    ) -> Self {
+        if !cx.has_flag::<Debugger>() {
+            if let Some(tasks) = &mut tasks {
+                tasks
+                    .templates
+                    .retain(|(_, task)| !matches!(task.task_type(), task::TaskType::Debug(_)));
+            }
+        }
+
+        Self {
+            tasks: tasks.map(Rc::new),
+            actions,
+        }
+    }
+
+    pub fn tasks(&self) -> Option<&ResolvedTasks> {
+        self.tasks.as_deref()
+    }
+
     fn len(&self) -> usize {
         match (&self.tasks, &self.actions) {
             (Some(tasks), Some(actions)) => actions.len() + tasks.templates.len(),
@@ -976,7 +998,6 @@ impl CodeActionsMenu {
         &self,
         _style: &EditorStyle,
         max_height_in_lines: u32,
-        y_flipped: bool,
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) -> AnyElement {
@@ -1055,7 +1076,6 @@ impl CodeActionsMenu {
         .occlude()
         .max_h(max_height_in_lines as f32 * window.line_height())
         .track_scroll(self.scroll_handle.clone())
-        .y_flipped(y_flipped)
         .with_width_from_item(
             self.actions
                 .iter()

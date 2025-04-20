@@ -1,7 +1,8 @@
-use anyhow::{anyhow, Result};
-use assistant_tool::{ActionLog, Tool};
+use crate::schema::json_schema_for;
+use anyhow::{Result, anyhow};
+use assistant_tool::{ActionLog, Tool, ToolResult};
 use gpui::{App, AppContext, Entity, Task};
-use language_model::LanguageModelRequestMessage;
+use language_model::{LanguageModelRequestMessage, LanguageModelToolSchemaFormat};
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,10 +39,10 @@ pub struct MovePathTool;
 
 impl Tool for MovePathTool {
     fn name(&self) -> String {
-        "move-path".into()
+        "move_path".into()
     }
 
-    fn needs_confirmation(&self) -> bool {
+    fn needs_confirmation(&self, _: &serde_json::Value, _: &App) -> bool {
         true
     }
 
@@ -53,9 +54,8 @@ impl Tool for MovePathTool {
         IconName::ArrowRightLeft
     }
 
-    fn input_schema(&self) -> serde_json::Value {
-        let schema = schemars::schema_for!(MovePathToolInput);
-        serde_json::to_value(&schema).unwrap()
+    fn input_schema(&self, format: LanguageModelToolSchemaFormat) -> Result<serde_json::Value> {
+        json_schema_for::<MovePathToolInput>(format)
     }
 
     fn ui_text(&self, input: &serde_json::Value) -> String {
@@ -90,10 +90,10 @@ impl Tool for MovePathTool {
         project: Entity<Project>,
         _action_log: Entity<ActionLog>,
         cx: &mut App,
-    ) -> Task<Result<String>> {
+    ) -> ToolResult {
         let input = match serde_json::from_value::<MovePathToolInput>(input) {
             Ok(input) => input,
-            Err(err) => return Task::ready(Err(anyhow!(err))),
+            Err(err) => return Task::ready(Err(anyhow!(err))).into(),
         };
         let rename_task = project.update(cx, |project, cx| {
             match project
@@ -128,5 +128,6 @@ impl Tool for MovePathTool {
                 )),
             }
         })
+        .into()
     }
 }

@@ -1,14 +1,13 @@
 // Disable command line from opening on release mode
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod logger;
 mod reliability;
 mod zed;
 
-use anyhow::{anyhow, Context as _, Result};
-use clap::{command, Parser};
+use anyhow::{Context as _, Result, anyhow};
+use clap::{Parser, command};
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
-use client::{parse_zed_link, Client, ProxySettings, UserStore};
+use client::{Client, ProxySettings, UserStore, parse_zed_link};
 use collab_ui::channel_view::ChannelView;
 use collections::HashMap;
 use dap::DapRegistry;
@@ -17,25 +16,24 @@ use editor::Editor;
 use extension::ExtensionHostProxy;
 use extension_host::ExtensionStore;
 use fs::{Fs, RealFs};
-use futures::{future, StreamExt};
+use futures::{StreamExt, future};
 use git::GitHostingProviderRegistry;
 use gpui::{App, AppContext as _, Application, AsyncApp, UpdateGlobal as _};
 
 use gpui_tokio::Tokio;
-use http_client::{read_proxy_from_env, Uri};
+use http_client::{Uri, read_proxy_from_env};
 use language::LanguageRegistry;
 use prompt_store::PromptBuilder;
 use reqwest_client::ReqwestClient;
 
 use assets::Assets;
-use logger::{init_logger, init_stdout_logger};
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use parking_lot::Mutex;
 use project::project_settings::ProjectSettings;
-use recent_projects::{open_ssh_project, SshSettings};
+use recent_projects::{SshSettings, open_ssh_project};
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use session::{AppSession, Session};
-use settings::{watch_config_file, Settings, SettingsStore};
+use settings::{Settings, SettingsStore, watch_config_file};
 use std::{
     env,
     io::{self, IsTerminal},
@@ -47,15 +45,15 @@ use theme::{
     ActiveTheme, IconThemeNotFoundError, SystemAppearance, ThemeNotFoundError, ThemeRegistry,
     ThemeSettings,
 };
-use util::{maybe, ResultExt, TryFutureExt};
+use util::{ResultExt, TryFutureExt, maybe};
 use uuid::Uuid;
-use welcome::{show_welcome_view, BaseKeymap, FIRST_OPEN};
+use welcome::{BaseKeymap, FIRST_OPEN, show_welcome_view};
 use workspace::{AppState, SerializedWorkspaceLocation, WorkspaceSettings, WorkspaceStore};
 use zed::{
-    app_menus, build_window_options, derive_paths_with_position, handle_cli_connection,
-    handle_keymap_file_changes, handle_settings_changed, handle_settings_file_changes,
-    initialize_workspace, inline_completion_registry, open_paths_with_positions, OpenListener,
-    OpenRequest,
+    OpenListener, OpenRequest, app_menus, build_window_options, derive_paths_with_position,
+    handle_cli_connection, handle_keymap_file_changes, handle_settings_changed,
+    handle_settings_file_changes, initialize_workspace, inline_completion_registry,
+    open_paths_with_positions,
 };
 
 #[cfg(unix)]
@@ -170,11 +168,31 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
 }
 
 fn main() {
+    // Check if there is a pending installer
+    // If there is, run the installer and exit
+    // And we don't want to run the installer if we are not the first instance
+    #[cfg(target_os = "windows")]
+    let is_first_instance = crate::zed::windows_only_instance::is_first_instance();
+    #[cfg(target_os = "windows")]
+    if is_first_instance && auto_update::check_pending_installation() {
+        return;
+    }
+
     let args = Args::parse();
+
+    if let Some(socket) = &args.askpass {
+        askpass::main(socket);
+        return;
+    }
+
+    // Set custom data directory.
+    if let Some(dir) = &args.user_data_dir {
+        paths::set_custom_data_dir(dir);
+    }
 
     #[cfg(all(not(debug_assertions), target_os = "windows"))]
     unsafe {
-        use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 
         if args.foreground {
             let _ = AttachConsole(ATTACH_PARENT_PROCESS);
@@ -190,10 +208,15 @@ fn main() {
         return;
     }
 
+    zlog::init();
     if stdout_is_a_pty() {
-        init_stdout_logger();
+        zlog::init_output_stdout();
     } else {
-        init_logger();
+        let result = zlog::init_output_file(paths::log_file(), Some(paths::old_log_file()));
+        if let Err(err) = result {
+            eprintln!("Could not open log file: {}... Defaulting to stdout", err);
+            zlog::init_output_stdout();
+        };
     }
 
     log::info!("========== starting zed ==========");
@@ -228,27 +251,30 @@ fn main() {
 
     let (open_listener, mut open_rx) = OpenListener::new();
 
-    let failed_single_instance_check = if *db::ZED_STATELESS
-        || *release_channel::RELEASE_CHANNEL == ReleaseChannel::Dev
-    {
-        false
-    } else {
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            crate::zed::listen_for_cli_connections(open_listener.clone()).is_err()
-        }
+    let failed_single_instance_check =
+        if *db::ZED_STATELESS || *release_channel::RELEASE_CHANNEL == ReleaseChannel::Dev {
+            false
+        } else {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                crate::zed::listen_for_cli_connections(open_listener.clone()).is_err()
+            }
 
-        #[cfg(target_os = "windows")]
-        {
-            !crate::zed::windows_only_instance::check_single_instance(open_listener.clone(), &args)
-        }
+            #[cfg(target_os = "windows")]
+            {
+                !crate::zed::windows_only_instance::handle_single_instance(
+                    open_listener.clone(),
+                    &args,
+                    is_first_instance,
+                )
+            }
 
-        #[cfg(target_os = "macos")]
-        {
-            use zed::mac_only_instance::*;
-            ensure_only_instance() != IsOnlyInstance::Yes
-        }
-    };
+            #[cfg(target_os = "macos")]
+            {
+                use zed::mac_only_instance::*;
+                ensure_only_instance() != IsOnlyInstance::Yes
+            }
+        };
     if failed_single_instance_check {
         println!("zed is already running");
         return;
@@ -469,6 +495,8 @@ fn main() {
             app_state.fs.clone(),
             cx,
         );
+        web_search::init(cx);
+        web_search_providers::init(app_state.client.clone(), cx);
         snippet_provider::init(cx);
         inline_completion_registry::init(
             app_state.client.clone(),
@@ -482,7 +510,7 @@ fn main() {
             prompt_builder.clone(),
             cx,
         );
-        assistant2::init(
+        agent::init(
             app_state.fs.clone(),
             app_state.client.clone(),
             prompt_builder.clone(),
@@ -962,6 +990,14 @@ struct Args {
     /// URLs can either be `file://` or `zed://` scheme, or relative to <https://zed.dev>.
     paths_or_urls: Vec<String>,
 
+    /// Sets a custom directory for all user data (e.g., database, extensions, logs).
+    /// This overrides the default platform-specific data directory location.
+    /// On macOS, the default is `~/Library/Application Support/Zed`.
+    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/zed`.
+    /// On Windows, the default is `%LOCALAPPDATA%\Zed`.
+    #[arg(long, value_name = "DIR")]
+    user_data_dir: Option<String>,
+
     /// Instructs zed to run as a dev server on this machine. (not implemented)
     #[arg(long)]
     dev_server_token: Option<String>,
@@ -970,6 +1006,11 @@ struct Args {
     /// that prevents Zed from starting, so you can't run `zed: copy system specs to clipboard`
     #[arg(long)]
     system_specs: bool,
+
+    /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
+    /// by having Zed act like netcat communicating over a Unix socket.
+    #[arg(long, hide = true)]
+    askpass: Option<String>,
 
     /// Run zed in the foreground, only used on Windows, to match the behavior of the behavior on macOS.
     #[arg(long)]

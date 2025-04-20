@@ -10,7 +10,6 @@ pub struct EditorSettings {
     pub cursor_shape: Option<CursorShape>,
     pub current_line_highlight: CurrentLineHighlight,
     pub selection_highlight: bool,
-    pub selection_highlight_debounce: u64,
     pub lsp_highlight_debounce: u64,
     pub hover_popover_enabled: bool,
     pub hover_popover_delay: u64,
@@ -39,7 +38,7 @@ pub struct EditorSettings {
     #[serde(default)]
     pub go_to_definition_fallback: GoToDefinitionFallback,
     pub jupyter: Jupyter,
-    pub hide_mouse_while_typing: Option<bool>,
+    pub hide_mouse: Option<HideMouseMode>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -225,6 +224,21 @@ pub enum GoToDefinitionFallback {
     FindAllReferences,
 }
 
+/// Determines when the mouse cursor should be hidden in an editor or input box.
+///
+/// Default: on_typing_and_movement
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HideMouseMode {
+    /// Never hide the mouse cursor
+    Never,
+    /// Hide only when typing
+    OnTyping,
+    /// Hide on both typing and cursor movement
+    #[default]
+    OnTypingAndMovement,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct EditorSettingsContent {
     /// Whether the cursor blinks in the editor.
@@ -236,10 +250,10 @@ pub struct EditorSettingsContent {
     ///
     /// Default: None
     pub cursor_shape: Option<CursorShape>,
-    /// Determines whether the mouse cursor should be hidden while typing in an editor or input box.
+    /// Determines when the mouse cursor should be hidden in an editor or input box.
     ///
-    /// Default: true
-    pub hide_mouse_while_typing: Option<bool>,
+    /// Default: on_typing_and_movement
+    pub hide_mouse: Option<HideMouseMode>,
     /// How to highlight the current line in the editor.
     ///
     /// Default: all
@@ -248,10 +262,6 @@ pub struct EditorSettingsContent {
     ///
     /// Default: true
     pub selection_highlight: Option<bool>,
-    /// The debounce delay before querying highlights based on the selected text.
-    ///
-    /// Default: 75
-    pub selection_highlight_debounce: Option<u64>,
     /// The debounce delay before querying highlights from the language
     /// server based on the current cursor location.
     ///

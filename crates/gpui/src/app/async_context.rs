@@ -1,9 +1,9 @@
 use crate::{
     AnyView, AnyWindowHandle, App, AppCell, AppContext, BackgroundExecutor, BorrowAppContext,
-    Entity, Focusable, ForegroundExecutor, Global, PromptLevel, Render, Reservation, Result, Task,
-    VisualContext, Window, WindowHandle,
+    Entity, EventEmitter, Focusable, ForegroundExecutor, Global, PromptLevel, Render, Reservation,
+    Result, Subscription, Task, VisualContext, Window, WindowHandle,
 };
-use anyhow::{anyhow, Context as _};
+use anyhow::{Context as _, anyhow};
 use derive_more::{Deref, DerefMut};
 use futures::channel::oneshot;
 use std::{future::Future, rc::Weak};
@@ -154,6 +154,26 @@ impl AsyncApp {
         Ok(lock.update(f))
     }
 
+    /// Arrange for the given callback to be invoked whenever the given entity emits an event of a given type.
+    /// The callback is provided a handle to the emitting entity and a reference to the emitted event.
+    pub fn subscribe<T, Event>(
+        &mut self,
+        entity: &Entity<T>,
+        mut on_event: impl FnMut(Entity<T>, &Event, &mut App) + 'static,
+    ) -> Result<Subscription>
+    where
+        T: 'static + EventEmitter<Event>,
+        Event: 'static,
+    {
+        let app = self
+            .app
+            .upgrade()
+            .ok_or_else(|| anyhow!("app was released"))?;
+        let mut lock = app.borrow_mut();
+        let subscription = lock.subscribe(entity, on_event);
+        Ok(subscription)
+    }
+
     /// Open a window with the given options based on the root view returned by the given function.
     pub fn open_window<V>(
         &self,
@@ -234,11 +254,11 @@ impl AsyncApp {
     }
 
     /// Run something using this entity and cx, when the returned struct is dropped
-    pub fn on_drop<T: 'static>(
+    pub fn on_drop<T: 'static, Callback: FnOnce(&mut T, &mut Context<T>) + 'static>(
         &self,
         entity: &WeakEntity<T>,
-        f: impl FnOnce(&mut T, &mut Context<T>) + 'static,
-    ) -> util::Deferred<impl FnOnce()> {
+        f: Callback,
+    ) -> util::Deferred<impl FnOnce() + use<T, Callback>> {
         let entity = entity.clone();
         let mut cx = self.clone();
         util::defer(move || {

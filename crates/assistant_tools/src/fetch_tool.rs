@@ -2,13 +2,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context as _, Result};
-use assistant_tool::{ActionLog, Tool};
+use crate::schema::json_schema_for;
+use anyhow::{Context as _, Result, anyhow, bail};
+use assistant_tool::{ActionLog, Tool, ToolResult};
 use futures::AsyncReadExt as _;
 use gpui::{App, AppContext as _, Entity, Task};
-use html_to_markdown::{convert_html_to_markdown, markdown, TagHandler};
+use html_to_markdown::{TagHandler, convert_html_to_markdown, markdown};
 use http_client::{AsyncBody, HttpClientWithUrl};
-use language_model::LanguageModelRequestMessage;
+use language_model::{LanguageModelRequestMessage, LanguageModelToolSchemaFormat};
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -115,7 +116,7 @@ impl Tool for FetchTool {
         "fetch".to_string()
     }
 
-    fn needs_confirmation(&self) -> bool {
+    fn needs_confirmation(&self, _: &serde_json::Value, _: &App) -> bool {
         true
     }
 
@@ -127,9 +128,8 @@ impl Tool for FetchTool {
         IconName::Globe
     }
 
-    fn input_schema(&self) -> serde_json::Value {
-        let schema = schemars::schema_for!(FetchToolInput);
-        serde_json::to_value(&schema).unwrap()
+    fn input_schema(&self, format: LanguageModelToolSchemaFormat) -> Result<serde_json::Value> {
+        json_schema_for::<FetchToolInput>(format)
     }
 
     fn ui_text(&self, input: &serde_json::Value) -> String {
@@ -146,10 +146,10 @@ impl Tool for FetchTool {
         _project: Entity<Project>,
         _action_log: Entity<ActionLog>,
         cx: &mut App,
-    ) -> Task<Result<String>> {
+    ) -> ToolResult {
         let input = match serde_json::from_value::<FetchToolInput>(input) {
             Ok(input) => input,
-            Err(err) => return Task::ready(Err(anyhow!(err))),
+            Err(err) => return Task::ready(Err(anyhow!(err))).into(),
         };
 
         let text = cx.background_spawn({
@@ -158,13 +158,15 @@ impl Tool for FetchTool {
             async move { Self::build_message(http_client, &url).await }
         });
 
-        cx.foreground_executor().spawn(async move {
-            let text = text.await?;
-            if text.trim().is_empty() {
-                bail!("no textual content found");
-            }
+        cx.foreground_executor()
+            .spawn(async move {
+                let text = text.await?;
+                if text.trim().is_empty() {
+                    bail!("no textual content found");
+                }
 
-            Ok(text)
-        })
+                Ok(text)
+            })
+            .into()
     }
 }

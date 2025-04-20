@@ -16,12 +16,12 @@
 //! constructed by combining these two systems into an all-in-one element.
 
 use crate::{
-    point, px, size, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
-    DispatchPhase, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId, Hitbox,
-    HitboxId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, LayoutId,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window,
+    Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
+    Element, ElementId, Entity, FocusHandle, Global, GlobalElementId, Hitbox, HitboxId,
+    IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, LayoutId, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
+    Visibility, Window, point, px, size,
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -1615,7 +1615,11 @@ impl Interactivity {
                                             global_id, hitbox, &style, window, cx,
                                         );
 
-                                        if !cx.has_active_drag() {
+                                        if let Some(drag) = cx.active_drag.as_ref() {
+                                            if let Some(mouse_cursor) = drag.cursor_style {
+                                                window.set_cursor_style(mouse_cursor, None);
+                                            }
+                                        } else {
                                             if let Some(mouse_cursor) = style.mouse_cursor {
                                                 window.set_cursor_style(mouse_cursor, Some(hitbox));
                                             }
@@ -1838,6 +1842,7 @@ impl Interactivity {
                 }
             });
         }
+        let drag_cursor_style = self.base_style.as_ref().mouse_cursor;
 
         let mut drag_listener = mem::take(&mut self.drag_listener);
         let drop_listeners = mem::take(&mut self.drop_listeners);
@@ -1929,6 +1934,7 @@ impl Interactivity {
                                         view: drag,
                                         value: drag_value,
                                         cursor_offset,
+                                        cursor_style: drag_cursor_style,
                                     });
                                     pending_mouse_down.take();
                                     window.refresh();
@@ -2269,6 +2275,7 @@ impl Interactivity {
                     }
                 }
 
+                style.mouse_cursor = drag.cursor_style;
                 cx.active_drag = Some(drag);
             }
         }

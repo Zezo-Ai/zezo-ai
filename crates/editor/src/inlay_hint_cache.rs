@@ -14,22 +14,22 @@ use std::{
 };
 
 use crate::{
-    display_map::Inlay, Anchor, Editor, ExcerptId, InlayId, MultiBuffer, MultiBufferSnapshot,
+    Anchor, Editor, ExcerptId, InlayId, MultiBuffer, MultiBufferSnapshot, display_map::Inlay,
 };
 use anyhow::Context as _;
 use clock::Global;
 use futures::future;
 use gpui::{AppContext as _, AsyncApp, Context, Entity, Task, Window};
-use language::{language_settings::InlayHintKind, Buffer, BufferSnapshot};
+use language::{Buffer, BufferSnapshot, language_settings::InlayHintKind};
 use parking_lot::RwLock;
 use project::{InlayHint, ResolveState};
 
-use collections::{hash_map, HashMap, HashSet};
+use collections::{HashMap, HashSet, hash_map};
 use language::language_settings::InlayHintSettings;
 use smol::lock::Semaphore;
 use sum_tree::Bias;
 use text::{BufferId, ToOffset, ToPoint};
-use util::{post_inc, ResultExt};
+use util::{ResultExt, post_inc};
 
 pub struct InlayHintCache {
     hints: HashMap<ExcerptId, Arc<RwLock<CachedExcerptHints>>>,
@@ -555,12 +555,12 @@ impl InlayHintCache {
     /// Completely forget of certain excerpts that were removed from the multibuffer.
     pub(super) fn remove_excerpts(
         &mut self,
-        excerpts_removed: Vec<ExcerptId>,
+        excerpts_removed: &[ExcerptId],
     ) -> Option<InlaySplice> {
         let mut to_remove = Vec::new();
         for excerpt_to_remove in excerpts_removed {
-            self.update_tasks.remove(&excerpt_to_remove);
-            if let Some(cached_hints) = self.hints.remove(&excerpt_to_remove) {
+            self.update_tasks.remove(excerpt_to_remove);
+            if let Some(cached_hints) = self.hints.remove(excerpt_to_remove) {
                 let cached_hints = cached_hints.read();
                 to_remove.extend(cached_hints.ordered_hints.iter().copied());
             }
@@ -989,6 +989,16 @@ fn fetch_and_update_hints(
                 }
 
                 let buffer = editor.buffer().read(cx).buffer(query.buffer_id)?;
+                if !editor.registered_buffers.contains_key(&query.buffer_id) {
+                    if let Some(project) = editor.project.as_ref() {
+                        project.update(cx, |project, cx| {
+                            editor.registered_buffers.insert(
+                                query.buffer_id,
+                                project.register_buffer_with_language_servers(&buffer, cx),
+                            );
+                        })
+                    }
+                }
                 editor
                     .semantics_provider
                     .as_ref()?
@@ -1292,11 +1302,11 @@ fn apply_hint_update(
 pub mod tests {
     use crate::editor_tests::update_test_language_settings;
     use crate::scroll::ScrollAmount;
-    use crate::{scroll::Autoscroll, test::editor_lsp_test_context::rust_lang, ExcerptRange};
+    use crate::{ExcerptRange, scroll::Autoscroll, test::editor_lsp_test_context::rust_lang};
     use futures::StreamExt;
     use gpui::{AppContext as _, Context, SemanticVersion, TestAppContext, WindowHandle};
     use itertools::Itertools as _;
-    use language::{language_settings::AllLanguageSettingsContent, Capability, FakeLspAdapter};
+    use language::{Capability, FakeLspAdapter, language_settings::AllLanguageSettingsContent};
     use language::{Language, LanguageConfig, LanguageMatcher};
     use lsp::FakeLanguageServer;
     use parking_lot::Mutex;
@@ -2565,60 +2575,24 @@ pub mod tests {
             multibuffer.push_excerpts(
                 buffer_1.clone(),
                 [
-                    ExcerptRange {
-                        context: Point::new(0, 0)..Point::new(2, 0),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(4, 0)..Point::new(11, 0),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(22, 0)..Point::new(33, 0),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(44, 0)..Point::new(55, 0),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(56, 0)..Point::new(66, 0),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(67, 0)..Point::new(77, 0),
-                        primary: None,
-                    },
+                    ExcerptRange::new(Point::new(0, 0)..Point::new(2, 0)),
+                    ExcerptRange::new(Point::new(4, 0)..Point::new(11, 0)),
+                    ExcerptRange::new(Point::new(22, 0)..Point::new(33, 0)),
+                    ExcerptRange::new(Point::new(44, 0)..Point::new(55, 0)),
+                    ExcerptRange::new(Point::new(56, 0)..Point::new(66, 0)),
+                    ExcerptRange::new(Point::new(67, 0)..Point::new(77, 0)),
                 ],
                 cx,
             );
             multibuffer.push_excerpts(
                 buffer_2.clone(),
                 [
-                    ExcerptRange {
-                        context: Point::new(0, 1)..Point::new(2, 1),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(4, 1)..Point::new(11, 1),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(22, 1)..Point::new(33, 1),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(44, 1)..Point::new(55, 1),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(56, 1)..Point::new(66, 1),
-                        primary: None,
-                    },
-                    ExcerptRange {
-                        context: Point::new(67, 1)..Point::new(77, 1),
-                        primary: None,
-                    },
+                    ExcerptRange::new(Point::new(0, 1)..Point::new(2, 1)),
+                    ExcerptRange::new(Point::new(4, 1)..Point::new(11, 1)),
+                    ExcerptRange::new(Point::new(22, 1)..Point::new(33, 1)),
+                    ExcerptRange::new(Point::new(44, 1)..Point::new(55, 1)),
+                    ExcerptRange::new(Point::new(56, 1)..Point::new(66, 1)),
+                    ExcerptRange::new(Point::new(67, 1)..Point::new(77, 1)),
                 ],
                 cx,
             );
@@ -2907,18 +2881,12 @@ pub mod tests {
         let (buffer_1_excerpts, buffer_2_excerpts) = multibuffer.update(cx, |multibuffer, cx| {
             let buffer_1_excerpts = multibuffer.push_excerpts(
                 buffer_1.clone(),
-                [ExcerptRange {
-                    context: Point::new(0, 0)..Point::new(2, 0),
-                    primary: None,
-                }],
+                [ExcerptRange::new(Point::new(0, 0)..Point::new(2, 0))],
                 cx,
             );
             let buffer_2_excerpts = multibuffer.push_excerpts(
                 buffer_2.clone(),
-                [ExcerptRange {
-                    context: Point::new(0, 1)..Point::new(2, 1),
-                    primary: None,
-                }],
+                [ExcerptRange::new(Point::new(0, 1)..Point::new(2, 1))],
                 cx,
             );
             (buffer_1_excerpts, buffer_2_excerpts)
