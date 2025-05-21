@@ -4056,6 +4056,7 @@ dependencies = [
  "paths",
  "serde",
  "serde_json",
+ "smol",
  "task",
  "util",
  "workspace-hack",
@@ -9540,6 +9541,7 @@ dependencies = [
  "async-recursion 1.1.1",
  "collections",
  "editor",
+ "fs",
  "gpui",
  "language",
  "linkify",
@@ -10076,7 +10078,6 @@ dependencies = [
  "async-tar",
  "async-trait",
  "async-watch",
- "async_zip",
  "futures 0.3.31",
  "http_client",
  "log",
@@ -10085,9 +10086,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "tempfile",
  "util",
- "walkdir",
  "which 6.0.3",
  "workspace-hack",
 ]
@@ -17029,6 +17028,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-fs",
+ "async_zip",
  "collections",
  "dirs 4.0.0",
  "dunce",
@@ -17050,6 +17050,7 @@ dependencies = [
  "tendril",
  "unicase",
  "util_macros",
+ "walkdir",
  "workspace-hack",
 ]
 
@@ -19137,6 +19138,7 @@ dependencies = [
  "aho-corasick",
  "anstream",
  "arrayvec",
+ "async-compression",
  "async-std",
  "async-tungstenite",
  "aws-config",
@@ -19652,7 +19654,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.188.0"
+version = "0.189.0"
 dependencies = [
  "activity_indicator",
  "agent",
@@ -19847,9 +19849,9 @@ dependencies = [
 
 [[package]]
 name = "zed_llm_client"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16d993fc42f9ec43ab76fa46c6eb579a66e116bb08cd2bc9a67f3afcaa05d39d"
+checksum = "9be71e2f9b271e1eb8eb3e0d986075e770d1a0a299fb036abc3f1fc13a2fa7eb"
 dependencies = [
  "anyhow",
  "serde",
