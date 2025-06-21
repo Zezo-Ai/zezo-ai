@@ -221,6 +221,10 @@ messages!(
     (ResolveCompletionDocumentationResponse, Background),
     (ResolveInlayHint, Background),
     (ResolveInlayHintResponse, Background),
+    (GetDocumentColor, Background),
+    (GetDocumentColorResponse, Background),
+    (GetColorPresentation, Background),
+    (GetColorPresentationResponse, Background),
     (RefreshCodeLens, Background),
     (GetCodeLens, Background),
     (GetCodeLensResponse, Background),
@@ -307,6 +311,9 @@ messages!(
     (RunDebugLocators, Background),
     (DebugRequest, Background),
     (LogToDebugConsole, Background),
+    (GetDocumentDiagnostics, Background),
+    (GetDocumentDiagnosticsResponse, Background),
+    (PullWorkspaceDiagnostics, Background)
 );
 
 request_messages!(
@@ -397,6 +404,8 @@ request_messages!(
         ResolveCompletionDocumentationResponse
     ),
     (ResolveInlayHint, ResolveInlayHintResponse),
+    (GetDocumentColor, GetDocumentColorResponse),
+    (GetColorPresentation, GetColorPresentationResponse),
     (RespondToChannelInvite, Ack),
     (RespondToContactRequest, Ack),
     (SaveBuffer, BufferSaved),
@@ -469,6 +478,8 @@ request_messages!(
     (ToggleBreakpoint, Ack),
     (GetDebugAdapterBinary, DebugAdapterBinary),
     (RunDebugLocators, DebugRequest),
+    (GetDocumentDiagnostics, GetDocumentDiagnosticsResponse),
+    (PullWorkspaceDiagnostics, Ack)
 );
 
 entity_messages!(
@@ -482,9 +493,11 @@ entity_messages!(
     BufferSaved,
     CloseBuffer,
     Commit,
+    GetColorPresentation,
     CopyProjectEntry,
     CreateBufferForPeer,
     CreateProjectEntry,
+    GetDocumentColor,
     DeleteProjectEntry,
     ExpandProjectEntry,
     ExpandAllForProjectEntry,
@@ -595,6 +608,8 @@ entity_messages!(
     RunDebugLocators,
     GetDebugAdapterBinary,
     LogToDebugConsole,
+    GetDocumentDiagnostics,
+    PullWorkspaceDiagnostics
 );
 
 entity_messages!(
