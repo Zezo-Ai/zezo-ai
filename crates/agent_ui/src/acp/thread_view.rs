@@ -820,6 +820,9 @@ impl AcpThreadView {
         let Some(thread) = self.thread() else {
             return;
         };
+        if !thread.read(cx).can_resume(cx) {
+            return;
+        }
 
         let task = thread.update(cx, |thread, cx| thread.resume(cx));
         cx.spawn(async move |this, cx| {
@@ -1302,11 +1305,24 @@ impl AcpThreadView {
                     None
                 };
 
+                let has_checkpoint_button = message
+                    .checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.show);
+
                 let agent_name = self.agent.name();
 
                 v_flex()
                     .id(("user_message", entry_ix))
-                    .pt_2()
+                    .map(|this| {
+                        if entry_ix == 0 && !has_checkpoint_button && rules_item.is_none()  {
+                            this.pt_4()
+                        } else if rules_item.is_some() {
+                            this.pt_3()
+                        } else {
+                            this.pt_2()
+                        }
+                    })
                     .pb_4()
                     .px_2()
                     .gap_1p5()
@@ -1315,6 +1331,7 @@ impl AcpThreadView {
                     .children(message.id.clone().and_then(|message_id| {
                         message.checkpoint.as_ref()?.show.then(|| {
                             h_flex()
+                                .px_3()
                                 .gap_2()
                                 .child(Divider::horizontal())
                                 .child(
@@ -1492,9 +1509,7 @@ impl AcpThreadView {
                 .child(self.render_thread_controls(cx))
                 .when_some(
                     self.thread_feedback.comments_editor.clone(),
-                    |this, editor| {
-                        this.child(Self::render_feedback_feedback_editor(editor, window, cx))
-                    },
+                    |this, editor| this.child(Self::render_feedback_feedback_editor(editor, cx)),
                 )
                 .into_any_element()
         } else {
@@ -1725,6 +1740,7 @@ impl AcpThreadView {
             tool_call.status,
             ToolCallStatus::Rejected | ToolCallStatus::Canceled | ToolCallStatus::Failed
         );
+
         let needs_confirmation = matches!(
             tool_call.status,
             ToolCallStatus::WaitingForConfirmation { .. }
@@ -1742,7 +1758,7 @@ impl AcpThreadView {
                 .absolute()
                 .top_0()
                 .right_0()
-                .w_16()
+                .w_12()
                 .h_full()
                 .bg(linear_gradient(
                     90.,
@@ -1902,7 +1918,7 @@ impl AcpThreadView {
                                     .into_any()
                             }),
                     )
-                    .when(in_progress && use_card_layout, |this| {
+                    .when(in_progress && use_card_layout && !is_open, |this| {
                         this.child(
                             div().absolute().right_2().child(
                                 Icon::new(IconName::ArrowCircle)
@@ -2460,7 +2476,6 @@ impl AcpThreadView {
         Some(
             h_flex()
                 .px_2p5()
-                .pb_1()
                 .child(
                     Icon::new(IconName::Attach)
                         .size(IconSize::XSmall)
@@ -2476,8 +2491,7 @@ impl AcpThreadView {
                                 Label::new(user_rules_text)
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted)
-                                    .truncate()
-                                    .buffer_font(cx),
+                                    .truncate(),
                             )
                             .hover(|s| s.bg(cx.theme().colors().element_hover))
                             .tooltip(Tooltip::text("View User Rules"))
@@ -2491,7 +2505,13 @@ impl AcpThreadView {
                             }),
                     )
                 })
-                .when(has_both, |this| this.child(Divider::vertical()))
+                .when(has_both, |this| {
+                    this.child(
+                        Label::new("•")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Disabled),
+                    )
+                })
                 .when_some(rules_file_text, |parent, rules_file_text| {
                     parent.child(
                         h_flex()
@@ -2500,8 +2520,7 @@ impl AcpThreadView {
                             .child(
                                 Label::new(rules_file_text)
                                     .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                                    .buffer_font(cx),
+                                    .color(Color::Muted),
                             )
                             .hover(|s| s.bg(cx.theme().colors().element_hover))
                             .tooltip(Tooltip::text("View Project Rules"))
@@ -3078,13 +3097,13 @@ impl AcpThreadView {
         h_flex()
             .p_1()
             .justify_between()
+            .flex_wrap()
             .when(expanded, |this| {
                 this.border_b_1().border_color(cx.theme().colors().border)
             })
             .child(
                 h_flex()
                     .id("edits-container")
-                    .w_full()
                     .gap_1()
                     .child(Disclosure::new("edits-disclosure", expanded))
                     .map(|this| {
@@ -4177,13 +4196,8 @@ impl AcpThreadView {
         container.child(open_as_markdown).child(scroll_to_top)
     }
 
-    fn render_feedback_feedback_editor(
-        editor: Entity<Editor>,
-        window: &mut Window,
-        cx: &Context<Self>,
-    ) -> Div {
-        let focus_handle = editor.focus_handle(cx);
-        v_flex()
+    fn render_feedback_feedback_editor(editor: Entity<Editor>, cx: &Context<Self>) -> Div {
+        h_flex()
             .key_context("AgentFeedbackMessageEditor")
             .on_action(cx.listener(move |this, _: &menu::Cancel, _, cx| {
                 this.thread_feedback.dismiss_comments();
@@ -4192,43 +4206,31 @@ impl AcpThreadView {
             .on_action(cx.listener(move |this, _: &menu::Confirm, _window, cx| {
                 this.submit_feedback_message(cx);
             }))
-            .mb_2()
-            .mx_4()
             .p_2()
+            .mb_2()
+            .mx_5()
+            .gap_1()
             .rounded_md()
             .border_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().editor_background)
-            .child(editor)
+            .child(div().w_full().child(editor))
             .child(
                 h_flex()
-                    .gap_1()
-                    .justify_end()
                     .child(
-                        Button::new("dismiss-feedback-message", "Cancel")
-                            .label_size(LabelSize::Small)
-                            .key_binding(
-                                KeyBinding::for_action_in(&menu::Cancel, &focus_handle, window, cx)
-                                    .map(|kb| kb.size(rems_from_px(10.))),
-                            )
+                        IconButton::new("dismiss-feedback-message", IconName::Close)
+                            .icon_color(Color::Error)
+                            .icon_size(IconSize::XSmall)
+                            .shape(ui::IconButtonShape::Square)
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.thread_feedback.dismiss_comments();
                                 cx.notify();
                             })),
                     )
                     .child(
-                        Button::new("submit-feedback-message", "Share Feedback")
-                            .style(ButtonStyle::Tinted(ui::TintColor::Accent))
-                            .label_size(LabelSize::Small)
-                            .key_binding(
-                                KeyBinding::for_action_in(
-                                    &menu::Confirm,
-                                    &focus_handle,
-                                    window,
-                                    cx,
-                                )
-                                .map(|kb| kb.size(rems_from_px(10.))),
-                            )
+                        IconButton::new("submit-feedback-message", IconName::Return)
+                            .icon_size(IconSize::XSmall)
+                            .shape(ui::IconButtonShape::Square)
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.submit_feedback_message(cx);
                             })),
@@ -4469,12 +4471,53 @@ impl AcpThreadView {
     }
 
     fn render_any_thread_error(&self, error: SharedString, cx: &mut Context<'_, Self>) -> Callout {
+        let can_resume = self
+            .thread()
+            .map_or(false, |thread| thread.read(cx).can_resume(cx));
+
+        let can_enable_burn_mode = self.as_native_thread(cx).map_or(false, |thread| {
+            let thread = thread.read(cx);
+            let supports_burn_mode = thread
+                .model()
+                .map_or(false, |model| model.supports_burn_mode());
+            supports_burn_mode && thread.completion_mode() == CompletionMode::Normal
+        });
+
         Callout::new()
             .severity(Severity::Error)
             .title("Error")
             .icon(IconName::XCircle)
             .description(error.clone())
-            .actions_slot(self.create_copy_button(error.to_string()))
+            .actions_slot(
+                h_flex()
+                    .gap_0p5()
+                    .when(can_resume && can_enable_burn_mode, |this| {
+                        this.child(
+                            Button::new("enable-burn-mode-and-retry", "Enable Burn Mode and Retry")
+                                .icon(IconName::ZedBurnMode)
+                                .icon_position(IconPosition::Start)
+                                .icon_size(IconSize::Small)
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_burn_mode(&ToggleBurnMode, window, cx);
+                                    this.resume_chat(cx);
+                                })),
+                        )
+                    })
+                    .when(can_resume, |this| {
+                        this.child(
+                            Button::new("retry", "Retry")
+                                .icon(IconName::RotateCw)
+                                .icon_position(IconPosition::Start)
+                                .icon_size(IconSize::Small)
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.resume_chat(cx);
+                                })),
+                        )
+                    })
+                    .child(self.create_copy_button(error.to_string())),
+            )
             .dismiss_action(self.dismiss_error_button(cx))
     }
 
