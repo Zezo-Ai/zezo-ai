@@ -1921,6 +1921,9 @@ impl Window {
     /// Executes the provided function with the specified rem size.
     ///
     /// This method must only be called as part of element drawing.
+    // This function is called in a highly recursive manner in editor
+    // prepainting, make sure its inlined to reduce the stack burden
+    #[inline]
     pub fn with_rem_size<F, R>(&mut self, rem_size: Option<impl Into<Pixels>>, f: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
@@ -2410,6 +2413,9 @@ impl Window {
     /// Push a text style onto the stack, and call a function with that style active.
     /// Use [`Window::text_style`] to get the current, combined text style. This method
     /// should only be called as part of element drawing.
+    // This function is called in a highly recursive manner in editor
+    // prepainting, make sure its inlined to reduce the stack burden
+    #[inline]
     pub fn with_text_style<F, R>(&mut self, style: Option<TextStyleRefinement>, f: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
@@ -2460,6 +2466,9 @@ impl Window {
 
     /// Invoke the given function with the given content mask after intersecting it
     /// with the current mask. This method should only be called during element drawing.
+    // This function is called in a highly recursive manner in editor
+    // prepainting, make sure its inlined to reduce the stack burden
+    #[inline]
     pub fn with_content_mask<R>(
         &mut self,
         mask: Option<ContentMask<Pixels>>,
@@ -3496,25 +3505,25 @@ impl Window {
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn on_mouse_event<Event: MouseEvent>(
         &mut self,
-        mut handler: impl FnMut(&Event, DispatchPhase, &mut Window, &mut App) + 'static,
+        mut listener: impl FnMut(&Event, DispatchPhase, &mut Window, &mut App) + 'static,
     ) {
         self.invalidator.debug_assert_paint();
 
         self.next_frame.mouse_listeners.push(Some(Box::new(
             move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
                 if let Some(event) = event.downcast_ref() {
-                    handler(event, phase, window, cx)
+                    listener(event, phase, window, cx)
                 }
             },
         )));
     }
 
-    /// Register a key event listener on the window for the next frame. The type of event
+    /// Register a key event listener on this node for the next frame. The type of event
     /// is determined by the first parameter of the given listener. When the next frame is rendered
     /// the listener will be cleared.
     ///
     /// This is a fairly low-level method, so prefer using event handlers on elements unless you have
-    /// a specific need to register a global listener.
+    /// a specific need to register a listener yourself.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn on_key_event<Event: KeyEvent>(
@@ -4443,34 +4452,42 @@ impl Window {
         }))
     }
 
-    /// Register an action listener on the window for the next frame. The type of action
+    /// Register an action listener on this node for the next frame. The type of action
     /// is determined by the first parameter of the given listener. When the next frame is rendered
     /// the listener will be cleared.
     ///
     /// This is a fairly low-level method, so prefer using action handlers on elements unless you have
-    /// a specific need to register a global listener.
+    /// a specific need to register a listener yourself.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
     pub fn on_action(
         &mut self,
         action_type: TypeId,
         listener: impl Fn(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static,
     ) {
+        self.invalidator.debug_assert_paint();
+
         self.next_frame
             .dispatch_tree
             .on_action(action_type, Rc::new(listener));
     }
 
-    /// Register an action listener on the window for the next frame if the condition is true.
-    /// The type of action is determined by the first parameter of the given listener.
-    /// When the next frame is rendered the listener will be cleared.
+    /// Register a capturing action listener on this node for the next frame if the condition is true.
+    /// The type of action is determined by the first parameter of the given listener. When the next
+    /// frame is rendered the listener will be cleared.
     ///
     /// This is a fairly low-level method, so prefer using action handlers on elements unless you have
-    /// a specific need to register a global listener.
+    /// a specific need to register a listener yourself.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
     pub fn on_action_when(
         &mut self,
         condition: bool,
         action_type: TypeId,
         listener: impl Fn(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static,
     ) {
+        self.invalidator.debug_assert_paint();
+
         if condition {
             self.next_frame
                 .dispatch_tree
